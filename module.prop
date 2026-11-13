@@ -1,0 +1,7 @@
+id=dsh-guard
+name=DSH 守护
+version=1.1.0
+versionCode=2
+author=DSH
+description=守护 io.github.jackwener.dsh：后台被杀自动拉起、掉线自愈、防电池受限。开关与日志见 WebUI。
+axeronPlugin=1
