@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>DSH 守护</title>
+<style>
+  :root{
+    --bg:#0e1116; --card:#171c24; --card2:#1f2630; --line:#2a3341;
+    --fg:#e8edf5; --dim:#8f9bb0; --ok:#3ddc84; --bad:#ff6b6b; --warn:#ffcc66; --acc:#5aa9ff;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;padding:16px 14px 40px;background:var(--bg);color:var(--fg);
+       font:15px/1.5 -apple-system,"Noto Sans SC",system-ui,sans-serif}
+  h1{font-size:19px;margin:0 0 2px;letter-spacing:.5px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+  .item{background:var(--card2);border-radius:10px;padding:9px 11px}
+  .item .k{color:var(--dim);font-size:11px;letter-spacing:.4px}
+  .item .v{font-size:15px;font-weight:600;margin-top:2px;word-break:break-all}
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+  .row{display:flex;gap:9px;flex-wrap:wrap}
+  button{flex:1 1 46%;min-height:44px;border-radius:11px;border:1px solid var(--line);
+         background:var(--card2);color:var(--fg);font-size:14px;font-weight:600}
+  button:active{transform:scale(.985);opacity:.85}
+  button[disabled]{opacity:.45}
+  button.pri{background:#1d3a5c;border-color:#2d5f96}
+  button.stop{background:#3a1f24;border-color:#6b2f38}
+  input{width:100%;min-height:44px;border-radius:11px;border:1px solid var(--line);
+        background:var(--card2);color:var(--fg);padding:0 12px;font-size:15px}
+  .field{display:flex;gap:9px;align-items:center;margin-top:9px}
+  .field label{color:var(--dim);font-size:12px;min-width:64px}
+  pre{background:#0b0e13;border:1px solid var(--line);border-radius:10px;padding:11px;
+      font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;color:#b9c6da;
+      max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0}
+  .tip{color:var(--dim);font-size:12px;margin-top:9px;word-break:break-all}
+  .banner{display:none;background:#3a2a17;border:1px solid #6b4c22;color:#ffd08a;
+          border-radius:11px;padding:10px 12px;font-size:13px;margin-bottom:12px}
+  .banner.show{display:block}
+  #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(20px);
+         background:#26303d;border:1px solid var(--line);border-radius:10px;padding:9px 15px;
+         font-size:13px;opacity:0;transition:.22s;pointer-events:none;max-width:88vw;z-index:9}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<h1>DSH 守护</h1>
+<div class="sub">io.github.jackwener.dsh · 被杀自动拉起 / 掉线自愈</div>
+
+<div class="banner" id="banner"></div>
+
+<div class="card">
+  <div class="grid">
+    <div class="item"><div class="k">守护</div><div class="v" id="v-guard">-</div></div>
+    <div class="item"><div class="k">DSH</div><div class="v" id="v-dsh">-</div></div>
+    <div class="item"><div class="k">检查间隔</div><div class="v" id="v-int">-</div></div>
+    <div class="item"><div class="k">连续失败</div><div class="v" id="v-fails">-</div></div>
+  </div>
+  <div class="tip" id="v-path">模块目录：解析中…</div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <button class="pri" id="b-start">启动守护</button>
+    <button class="stop" id="b-stop">停止守护</button>
+    <button id="b-launch">立即拉起</button>
+    <button id="b-opt">系统放行</button>
+  </div>
+  <div class="field">
+    <label>间隔秒</label>
+    <input id="i-int" type="number" min="3" max="120" inputmode="numeric" placeholder="8">
+    <button style="flex:0 0 84px" id="b-save">保存</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row" style="margin-bottom:9px">
+    <button id="b-log">刷新日志</button>
+    <button id="b-test">自检</button>
+  </div>
+  <pre id="log">点「刷新日志」读取…</pre>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const toastEl = $('toast');
+let toastTimer;
+function toast(msg, ms) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms || 2200);
+}
+
+/* ---------- AxManager 桥（接口可能是 Axeron.exec，也可能只有 Axeron.shell） ---------- */
+function bridge() {
+  if (typeof Axeron === 'undefined' || !Axeron) return null;
+  if (typeof Axeron.exec === 'function') return (cmd) => Axeron.exec(cmd, JSON.stringify({}));
+  if (typeof Axeron.shell === 'function') return (cmd) => Axeron.shell(cmd);
+  return null;
+}
+
+async function sh(cmd) {
+  const fn = bridge();
+  if (!fn) throw new Error('不在 AxManager WebUI 环境（没拿到 Axeron 接口）');
+  let r;
+  const raw = await fn(cmd);
+  if (raw && typeof raw === 'object') r = raw;
+  else { try { r = JSON.parse(raw); } catch (e) { return { code: 0, out: String(raw || ''), err: '' }; } }
+  let code = 0;
+  if (typeof r.result === 'number') code = r.result;
+  else if (r.result && typeof r.result.code === 'number') code = r.result.code;
+  else if (typeof r.code === 'number') code = r.code;
+  const out = r.stdout != null ? r.stdout
+            : (r.out != null ? r.out
+            : (typeof r.result === 'string' ? r.result : ''));
+  const err = r.stderr != null ? r.stderr : (r.err != null ? r.err : '');
+  return { code, out, err };
+}
+
+/* ---------- 定位模块目录 ---------- */
+let ENTRY = null;   // 实际可用的 action.sh 路径
+async function findEntry() {
+  if (ENTRY) return ENTRY;
+  const dirs = [];
+  try {
+    const w = await sh('cat /sdcard/.dsh-guard/where 2>/dev/null');
+    const p = (w.out || '').trim();
+    if (p) dirs.push(p);
+  } catch (e) {}
+  try {
+    const cw = await sh('pwd');
+    const p = (cw.out || '').trim();
+    if (p) { dirs.push(p); dirs.push(p.replace(/\/run\/?$/, '')); }
+  } catch (e) {}
+  dirs.push('/data/adb/axeron/plugins/dsh-guard', '/sdcard/dsh-guard',
+            '/storage/emulated/0/dsh-guard', '/data/adb/modules/dsh-guard',
+            '/sdcard/Download/dsh-guard');
+  for (const d of dirs) {
+    if (!d) continue;
+    for (const sub of ['/run/action.sh', '/action.sh']) {
+      try {
+        const t = await sh('[ -f "' + d + sub + '" ] && echo __yes__');
+        if ((t.out || '').includes('__yes__')) { ENTRY = d + sub; return ENTRY; }
+      } catch (e) {}
+    }
+  }
+  return null;
+}
+
+async function act(args) {
+  const entry = await findEntry();
+  if (!entry) throw new Error('找不到 action.sh，模块可能没装好');
+  const r = await sh('sh "' + entry + '" ' + args);
+  const text = ((r.out || '') + (r.err || '')).trim();
+  if (r.code && !text) throw new Error('命令失败 code=' + r.code);
+  return text;
+}
+
+/* ---------- 状态 ---------- */
+function kv(text) {
+  const o = {};
+  (text || '').split('\n').forEach((line) => {
+    const i = line.indexOf('=');
+    if (i > 0) o[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  });
+  return o;
+}
+
+let everStarted = false;
+async function refresh() {
+  try {
+    const entry = await findEntry();
+    $('v-path').textContent = entry ? ('入口：' + entry) : '入口：未找到';
+    if (!entry) return;
+    const s = kv(await act('status'));
+    const running = s.guard === 'running';
+    const alive = s.dsh === 'alive';
+    const enabled = s.enabled === '1';
+    $('v-guard').textContent = running ? '运行中' : '已停止';
+    $('v-guard').className = 'v ' + (running ? 'ok' : 'bad');
+    $('v-dsh').textContent = alive ? '在线' : '离线';
+    $('v-dsh').className = 'v ' + (alive ? 'ok' : 'bad');
+    $('v-int').textContent = (s.interval || '-') + ' 秒';
+    $('v-fails').textContent = (s.fails != null && s.fails !== '') ? s.fails : '0';
+    if (!$('i-int').value) $('i-int').value = s.interval || 8;
+    $('b-start').disabled = running;
+    $('b-stop').disabled = !running;
+    const banner = $('banner');
+    if (!running) {
+      banner.textContent = enabled
+        ? '守护没在跑（重启或服务重连后需要点一次「启动守护」）。'
+        : '守护处于停用状态（enabled=0）。要恢复就点「启动守护」。';
+      banner.classList.add('show');
+    } else {
+      banner.classList.remove('show');
+    }
+  } catch (e) {
+    $('v-guard').textContent = '不可用';
+    $('v-guard').className = 'v bad';
+    $('v-path').textContent = String(e.message || e);
+  }
+}
+
+/* ---------- 交互 ---------- */
+function busy(btn, fn) {
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try { await fn(); } catch (e) { toast(String(e.message || e), 3000); }
+    btn.disabled = false;
+  });
+}
+
+busy($('b-start'), async () => {
+  await act('set enabled 1');
+  toast(await act('start') || '已启动');
+  await refresh();
+});
+busy($('b-stop'), async () => { toast(await act('stop') || '已停止'); await refresh(); });
+busy($('b-launch'), async () => { toast(await act('launch') || '已发起'); setTimeout(refresh, 1500); });
+busy($('b-opt'), async () => { $('log').textContent = await act('optimize'); toast('已尝试放行，见下方输出', 2600); });
+busy($('b-save'), async () => {
+  const v = parseInt($('i-int').value, 10);
+  if (!(v >= 3 && v <= 120)) throw new Error('间隔需在 3–120 秒之间');
+  toast(await act('set interval ' + v));
+  await act('restart');
+  await refresh();
+});
+busy($('b-log'), async () => { $('log').textContent = (await act('log 80')) || '暂无日志'; });
+busy($('b-test'), async () => { $('log').textContent = await act('selftest'); });
+
+refresh();
+setInterval(refresh, 8000);
+</script>
+</body>
+</html>
